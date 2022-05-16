@@ -1,0 +1,157 @@
+name: Tests
+
+on:
+  push:
+    branches:
+    - master
+  pull_request:
+    branches:
+    - master
+
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  lint:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ['3.10']
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Setup conda
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        activate-environment: ipycanvas-dev
+        environment-file: dev-environment.yml
+        python-version: ${{ matrix.python-version }}
+        mamba-version: "*"
+        auto-activate-base: false
+        channels: conda-forge
+
+    - name: Test PEP8
+      run: |
+        black --check ipycanvas
+        blacken-docs docs/source/*.rst
+
+    - name: Test PEP8 on example notebooks
+      run: jupytext examples/*.ipynb --check 'black --check {}'
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Setup conda
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        activate-environment: ipycanvas-dev
+        environment-file: dev-environment.yml
+        python-version: ${{ matrix.python-version }}
+        mamba-version: "*"
+        auto-activate-base: false
+        channels: conda-forge
+
+    - name: Build packages
+      run: |
+        python setup.py sdist bdist_wheel
+        cd dist
+        sha256sum * | tee SHA256SUMS
+
+    - name: Upload builds
+      uses: actions/upload-artifact@v2
+      with:
+        name: dist ${{ github.run_number }}
+        path: ./dist
+
+  tests:
+    runs-on: ${{ matrix.os }}-latest
+    needs: [build]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu]
+        python: ['3.10']
+        include:
+          - python: '3.10'
+            dist: 'ipycanvas*.whl'
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup conda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+          mamba-version: "*"
+          auto-activate-base: false
+          channels: conda-forge
+
+      - name: Install dependencies
+        run: mamba install python=${{ matrix.python-version }} pip yarn jupyterlab ipywidgets jupyter-packaging
+
+      - uses: actions/download-artifact@v2
+        with:
+          name: dist ${{ github.run_number }}
+          path: ./dist
+
+      - name: Install the package
+        run: |
+          cd dist
+          pip install -vv ${{ matrix.dist }}
+
+      - name: Test installation files
+        run: |
+          test -d $CONDA_PREFIX/share/jupyter/nbextensions/ipycanvas
+          test -f $CONDA_PREFIX/share/jupyter/nbextensions/ipycanvas/extension.js
+          test -f $CONDA_PREFIX/share/jupyter/nbextensions/ipycanvas/index.js
+          test -d $CONDA_PREFIX/share/jupyter/labextensions/ipycanvas
+          test -f $CONDA_PREFIX/share/jupyter/labextensions/ipycanvas/package.json
+          test -d $CONDA_PREFIX/share/jupyter/labextensions/ipycanvas/static
+
+      - name: Validate the nbextension
+        run: jupyter nbextension list 2>&1 | grep "ipycanvas/extension"
+
+      - name: Validate the labextension
+        run: jupyter labextension list 2>&1 | grep ipycanvas
+
+      - name: Install Galata
+        run: |
+          yarn install
+          yarn playwright install chromium
+        working-directory: ui-tests
+
+      - name: Launch JupyterLab
+        run: yarn run start:detached
+        working-directory: ui-tests
+
+      - name: Wait for JupyterLab
+        uses: ifaxity/wait-on-action@v1
+        with:
+          resource: http-get://localhost:8888/api
+          timeout: 20000
+
+      - name: Run UI Tests
+        run: yarn run test
+        working-directory: ui-tests
+
+      - name: Upload UI Test artifacts
+        if: always()
+        uses: actions/upload-artifact@v2
+        with:
+          name: ui-test-output
+          path: |
+            ui-tests/playwright-report
+            ui-tests/test-results
